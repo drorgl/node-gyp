@@ -1,3 +1,6 @@
 gyp/test
 node_modules
 test/.node-gyp
+
+/.vscode
+/6.5.0
