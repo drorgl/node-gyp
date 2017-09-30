@@ -31,6 +31,8 @@ import gyp.xcode_emulation
 from gyp.common import GetEnvironFallback
 from gyp.common import GypError
 
+import hashlib
+
 generator_default_variables = {
   'EXECUTABLE_PREFIX': '',
   'EXECUTABLE_SUFFIX': '',
@@ -90,7 +92,10 @@ def CalculateVariables(default_variables, params):
     if flavor == 'android':
       operating_system = 'linux'  # Keep this legacy behavior for now.
     default_variables.setdefault('OS', operating_system)
-    default_variables.setdefault('SHARED_LIB_SUFFIX', '.so')
+    if flavor == 'aix':
+      default_variables.setdefault('SHARED_LIB_SUFFIX', '.a')
+    else:
+      default_variables.setdefault('SHARED_LIB_SUFFIX', '.so')
     default_variables.setdefault('SHARED_LIB_DIR','$(builddir)/lib.$(TOOLSET)')
     default_variables.setdefault('LIB_DIR', '$(obj).$(TOOLSET)')
 
@@ -227,6 +232,24 @@ cmd_solink_module = $(LINK.$(TOOLSET)) -shared $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSE
 """
 
 
+LINK_COMMANDS_OS390 = """\
+quiet_cmd_alink = AR($(TOOLSET)) $@
+cmd_alink = rm -f $@ && $(AR.$(TOOLSET)) crs $@ $(filter %.o,$^)
+
+quiet_cmd_alink_thin = AR($(TOOLSET)) $@
+cmd_alink_thin = rm -f $@ && $(AR.$(TOOLSET)) crsT $@ $(filter %.o,$^)
+
+quiet_cmd_link = LINK($(TOOLSET)) $@
+cmd_link = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(LD_INPUTS)
+
+quiet_cmd_solink = SOLINK($(TOOLSET)) $@
+cmd_solink = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(LD_INPUTS) $(LIBS) -Wl,DLL
+
+quiet_cmd_solink_module = SOLINK_MODULE($(TOOLSET)) $@
+cmd_solink_module = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(filter-out FORCE_DO_CMD, $^) $(LIBS) -Wl,DLL
+"""
+
+
 # Header of toplevel Makefile.
 # This should go into the build tree, but it's easier to keep it here for now.
 SHARED_HEADER = ("""\
@@ -290,7 +313,7 @@ CFLAGS.host ?= $(CPPFLAGS_host) $(CFLAGS_host)
 CXX.host ?= %(CXX.host)s
 CXXFLAGS.host ?= $(CPPFLAGS_host) $(CXXFLAGS_host)
 LINK.host ?= %(LINK.host)s
-LDFLAGS.host ?=
+LDFLAGS.host ?= $(LDFLAGS_host)
 AR.host ?= %(AR.host)s
 
 # Define a dir function that can handle spaces.
@@ -310,7 +333,7 @@ dirx = $(call unreplace_spaces,$(dir $(call replace_spaces,$1)))
 # We write to a dep file on the side first and then rename at the end
 # so we can't end up with a broken dep file.
 depfile = $(depsdir)/$(call replace_spaces,$@).d
-DEPFLAGS = -MMD -MF $(depfile).raw
+DEPFLAGS = %(makedep_args)s -MF $(depfile).raw
 
 # We have to fixup the deps output in a few ways.
 # (1) the file output should mention the proper .o file.
@@ -365,7 +388,7 @@ cmd_touch = touch $@
 
 quiet_cmd_copy = COPY $@
 # send stderr to /dev/null to ignore messages when linking directories.
-cmd_copy = rm -rf "$@" && cp %(copy_archive_args)s "$<" "$@"
+cmd_copy = ln -f "$<" "$@" 2>/dev/null || (rm -rf "$@" && cp %(copy_archive_args)s "$<" "$@")
 
 %(link_commands)s
 """
@@ -1347,7 +1370,10 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
       if target[:3] == 'lib':
         target = target[3:]
       target_prefix = 'lib'
-      target_ext = '.so'
+      if self.flavor == 'aix':
+        target_ext = '.a'
+      else:
+        target_ext = '.so'
     elif self.type == 'none':
       target = '%s.stamp' % target
     elif self.type != 'executable':
@@ -1743,7 +1769,10 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
       #   actual command.
       # - The intermediate recipe will 'touch' the intermediate file.
       # - The multi-output rule will have an do-nothing recipe.
-      intermediate = "%s.intermediate" % (command if command else self.target)
+
+      # Hash the target name to avoid generating overlong filenames.
+      cmddigest = hashlib.sha1(command if command else self.target).hexdigest()
+      intermediate = "%s.intermediate" % (cmddigest)
       self.WriteLn('%s: %s' % (' '.join(outputs), intermediate))
       self.WriteLn('\t%s' % '@:');
       self.WriteLn('%s: %s' % ('.INTERMEDIATE', intermediate))
@@ -1917,13 +1946,11 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
     """Returns the location of the final output for an installable target."""
     # Xcode puts shared_library results into PRODUCT_DIR, and some gyp files
     # rely on this. Emulate this behavior for mac.
-
-    # XXX(TooTallNate): disabling this code since we don't want this behavior...
-    #if (self.type == 'shared_library' and
-    #    (self.flavor != 'mac' or self.toolset != 'target')):
-    #  # Install all shared libs into a common directory (per toolset) for
-    #  # convenient access with LD_LIBRARY_PATH.
-    #  return '$(builddir)/lib.%s/%s' % (self.toolset, self.alias)
+    if (self.type == 'shared_library' and
+        (self.flavor != 'mac' or self.toolset != 'target')):
+      # Install all shared libs into a common directory (per toolset) for
+      # convenient access with LD_LIBRARY_PATH.
+      return '$(builddir)/lib.%s/%s' % (self.toolset, self.alias)
     return '$(builddir)/' + self.alias
 
 
@@ -2013,6 +2040,7 @@ def GenerateOutput(target_list, target_dicts, data, params):
 
   flock_command= 'flock'
   copy_archive_arguments = '-af'
+  makedep_arguments = '-MMD'
   header_params = {
       'default_target': default_target,
       'builddir': builddir_name,
@@ -2023,6 +2051,7 @@ def GenerateOutput(target_list, target_dicts, data, params):
       'extra_commands': '',
       'srcdir': srcdir,
       'copy_archive_args': copy_archive_arguments,
+      'makedep_args': makedep_arguments,
     }
   if flavor == 'mac':
     flock_command = './gyp-mac-tool flock'
@@ -2035,6 +2064,14 @@ def GenerateOutput(target_list, target_dicts, data, params):
   elif flavor == 'android':
     header_params.update({
         'link_commands': LINK_COMMANDS_ANDROID,
+    })
+  elif flavor == 'zos':
+    copy_archive_arguments = '-fPR'
+    makedep_arguments = '-qmakedep=gcc'
+    header_params.update({
+        'copy_archive_args': copy_archive_arguments,
+        'makedep_args': makedep_arguments,
+        'link_commands': LINK_COMMANDS_OS390,
     })
   elif flavor == 'solaris':
     header_params.update({
@@ -2065,10 +2102,10 @@ def GenerateOutput(target_list, target_dicts, data, params):
     'AR.target':   GetEnvironFallback(('AR_target', 'AR'), '$(AR)'),
     'CXX.target':  GetEnvironFallback(('CXX_target', 'CXX'), '$(CXX)'),
     'LINK.target': GetEnvironFallback(('LINK_target', 'LINK'), '$(LINK)'),
-    'CC.host':     GetEnvironFallback(('CC_host', 'CC'), 'gcc'),
-    'AR.host':     GetEnvironFallback(('AR_host', 'AR'), 'ar'),
-    'CXX.host':    GetEnvironFallback(('CXX_host', 'CXX'), 'g++'),
-    'LINK.host':   GetEnvironFallback(('LINK_host', 'LINK'), '$(CXX.host)'),
+    'CC.host':     GetEnvironFallback(('CC_host',), 'gcc'),
+    'AR.host':     GetEnvironFallback(('AR_host',), 'ar'),
+    'CXX.host':    GetEnvironFallback(('CXX_host',), 'g++'),
+    'LINK.host':   GetEnvironFallback(('LINK_host',), '$(CXX.host)'),
   })
 
   build_file, _, _ = gyp.common.ParseQualifiedTarget(target_list[0])

@@ -89,6 +89,17 @@
           '-Wl,-bimport:<(node_exp_file)'
         ],
       }],
+      [ 'OS=="zos"', {
+        'cflags': [
+          '-q64',
+          '-Wc,DLL',
+          '-qlonglong'
+        ],
+        'ldflags': [
+          '-q64',
+          '<(node_exp_file)'
+        ],
+      }],
       [ 'OS=="win"', {
         'conditions': [
           ['node_engine=="chakracore"', {
@@ -109,7 +120,7 @@
           '-luuid.lib',
           '-lodbc32.lib',
           '-lDelayImp.lib',
-          '-l"<(node_root_dir)/$(ConfigurationName)/<(node_lib_file)"'
+          '-l"<(node_lib_file)"'
         ],
         'msvs_disabled_warnings': [
           # warning C4251: 'node::ObjectWrap::handle_' : class 'v8::Persistent<T>'
